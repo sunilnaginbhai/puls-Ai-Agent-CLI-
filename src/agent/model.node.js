@@ -1,6 +1,6 @@
 import { ChatGroq } from "@langchain/groq"
 import { getApiKey } from "../config/settings.store.js"
-import { upsertFilesTool, listDirectoryTool, createDirectoryTool, moveFileTool, scanDirectoryTool } from "../tools/files/file.tools.js"
+import { applyFileOperationsTool, listDirectoryTool, scanDirectoryTool } from "../tools/files/file.tools.js"
 import { ChatGoogle } from "@langchain/google"
 /**
  * Handles the LLM node logic for the state graph.
@@ -19,9 +19,9 @@ export async function LLMNode(state, config) {
     //     apiKey: (await getApiKey()).apiKey,
     // })
 
-    const tools = [upsertFilesTool, listDirectoryTool, createDirectoryTool, moveFileTool, scanDirectoryTool]
+    const tools = [applyFileOperationsTool, listDirectoryTool, scanDirectoryTool]
 
-    const modelwithTools = model.bindTools(tools)
+    const modelwithTools = model.bindTools(tools, { parallel_tool_calls: false })
 
     const stream = await modelwithTools.stream(state.messages)
     let aiMessage

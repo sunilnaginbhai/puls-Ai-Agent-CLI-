@@ -1,6 +1,7 @@
 import { tool } from "langchain";
 import * as z from "zod"
 import fs from "fs/promises"
+import { constants as fsConstants } from "node:fs";
 import path from "path"
 import { askPermission } from "../../security/permission.prompt.js";
 
@@ -73,33 +74,213 @@ export async function resolveWorkspacePath(inputPath, { allowMissing = false } =
     }
 }
 
-/**
- * Create/Update multiple files at once (create one if not existed)
- */
-export const upsertFilesTool = tool(
-    async function ({ files }) {
-        // Validate the whole batch before writing any file.
-        const validatedFiles = await Promise.all(files.map(async file => ({
-            ...file,
-            path: await resolveWorkspacePath(file.path, { allowMissing: true }),
-        })));
+const fileOperationSchema = z.discriminatedUnion("type", [
+    z.object({
+        type: z.literal("write_file"),
+        path: z.string().min(1).describe("File path inside the active workspace"),
+        content: z.string().describe("Complete file contents to write"),
+        mode: z.enum(["create", "replace"]).default("create").describe("Use create for a new file; use replace only when the user asked to change an existing file"),
+    }),
+    z.object({
+        type: z.literal("create_directory"),
+        path: z.string().min(1).describe("Directory path inside the active workspace"),
+    }),
+    z.object({
+        type: z.literal("move_file"),
+        source: z.string().min(1).describe("Existing file path inside the active workspace"),
+        destination: z.string().min(1).describe("Destination directory inside the active workspace"),
+    }),
+]);
 
-        await Promise.all(validatedFiles.map(async file => {
-            return await fs.writeFile(file.path, file.content)
-        }))
-        return "file created successfully"
+function operationPathKey(targetPath) {
+    const normalized = path.resolve(targetPath);
+    return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+async function lstatIfPresent(targetPath) {
+    try {
+        return await fs.lstat(targetPath);
+    } catch (error) {
+        if (error.code === "ENOENT") return null;
+        throw error;
+    }
+}
+
+function assertNotSymlink(stats, targetPath) {
+    if (stats?.isSymbolicLink()) {
+        throw new Error(`Symbolic links are not accepted for batch mutations: ${targetPath}`);
+    }
+}
+
+async function prepareFileOperations(operations) {
+    const prepared = [];
+    const plannedTargets = new Set();
+
+    function reserveTarget(targetPath) {
+        const key = operationPathKey(targetPath);
+        if (plannedTargets.has(key)) {
+            throw new Error(`The batch contains more than one operation for: ${targetPath}`);
+        }
+        plannedTargets.add(key);
+    }
+
+    for (const operation of operations) {
+        if (operation.type === "write_file") {
+            const targetPath = await resolveWorkspacePath(operation.path, { allowMissing: true });
+            const existing = await lstatIfPresent(targetPath);
+            assertNotSymlink(existing, targetPath);
+
+            if (operation.mode === "create" && existing) {
+                throw new Error(`File already exists; refusing to overwrite: ${targetPath}`);
+            }
+            if (operation.mode === "replace" && (!existing || !existing.isFile())) {
+                throw new Error(`Replace requires an existing regular file: ${targetPath}`);
+            }
+
+            reserveTarget(targetPath);
+            const preview = operation.content.replace(/\s+/g, " ").slice(0, 120);
+            prepared.push({
+                ...operation,
+                targetPath,
+                plan: `${operation.mode === "replace" ? "REPLACE FILE" : "CREATE FILE"}: ${targetPath}\n   ${Buffer.byteLength(operation.content, "utf8")} bytes; parent folders will be created if needed${preview ? `\n   Preview: ${preview}${operation.content.length > 120 ? "…" : ""}` : ""}`,
+            });
+            continue;
+        }
+
+        if (operation.type === "create_directory") {
+            const targetPath = await resolveWorkspacePath(operation.path, { allowMissing: true });
+            const existing = await lstatIfPresent(targetPath);
+            assertNotSymlink(existing, targetPath);
+            if (existing && !existing.isDirectory()) {
+                throw new Error(`A non-directory already exists at: ${targetPath}`);
+            }
+
+            if (existing) {
+                prepared.push({ ...operation, targetPath, noOp: true, plan: `NO CHANGE (directory exists): ${targetPath}` });
+            } else {
+                reserveTarget(targetPath);
+                prepared.push({ ...operation, targetPath, plan: `CREATE DIRECTORY: ${targetPath} (including missing parent folders)` });
+            }
+            continue;
+        }
+
+        const sourcePath = await resolveWorkspacePath(operation.source);
+        const sourceStats = await lstatIfPresent(sourcePath);
+        assertNotSymlink(sourceStats, sourcePath);
+        if (!sourceStats?.isFile()) {
+            throw new Error(`Move source must be an existing regular file: ${sourcePath}`);
+        }
+        if (/^\.[^.]+$/.test(path.basename(sourcePath))) {
+            throw new Error(`Refusing to move extension-only hidden file: ${sourcePath}`);
+        }
+
+        const destinationDirectory = await resolveWorkspacePath(operation.destination, { allowMissing: true });
+        const destinationStats = await lstatIfPresent(destinationDirectory);
+        assertNotSymlink(destinationStats, destinationDirectory);
+        if (destinationStats && !destinationStats.isDirectory()) {
+            throw new Error(`Move destination must be a directory: ${destinationDirectory}`);
+        }
+
+        const destinationPath = await resolveWorkspacePath(
+            path.join(destinationDirectory, path.basename(sourcePath)),
+            { allowMissing: true }
+        );
+        if (path.resolve(sourcePath) === path.resolve(destinationPath)) {
+            throw new Error(`Source and destination are the same: ${sourcePath}`);
+        }
+        if (await lstatIfPresent(destinationPath)) {
+            throw new Error(`Move would overwrite an existing path: ${destinationPath}`);
+        }
+
+        reserveTarget(destinationPath);
+        prepared.push({
+            ...operation,
+            sourcePath,
+            destinationDirectory,
+            destinationPath,
+            plan: `MOVE FILE: ${sourcePath}\n   TO: ${destinationPath}${destinationStats ? "" : "\n   Destination folder will be created if needed"}`,
+        });
+    }
+
+    return prepared;
+}
+
+/** One approval for the complete set of proposed file mutations. */
+export const applyFileOperationsTool = tool(
+    async ({ operations }) => {
+        const prepared = await prepareFileOperations(operations);
+        const changes = prepared.filter((operation) => !operation.noOp);
+
+        if (changes.length === 0) {
+            return "No file changes were needed; all requested directories already exist.";
+        }
+
+        const plan = prepared.map((operation, index) => `${index + 1}. ${operation.plan}`).join("\n");
+        const approved = await askPermission(
+            `Approve ${changes.length} file operation${changes.length === 1 ? "" : "s"}`,
+            plan
+        );
+
+        if (!approved) {
+            return `Cancelled. None of the ${changes.length} planned file operation(s) were executed.`;
+        }
+
+        const completed = [];
+        for (const operation of changes) {
+            try {
+                if (operation.type === "create_directory") {
+                    await fs.mkdir(operation.targetPath, { recursive: true });
+                    completed.push(`Created directory: ${operation.targetPath}`);
+                    continue;
+                }
+
+                if (operation.type === "write_file") {
+                    await fs.mkdir(path.dirname(operation.targetPath), { recursive: true });
+                    const current = await lstatIfPresent(operation.targetPath);
+                    assertNotSymlink(current, operation.targetPath);
+
+                    if (operation.mode === "create") {
+                        if (current) throw new Error(`File appeared after approval; refusing to overwrite: ${operation.targetPath}`);
+                        await fs.writeFile(operation.targetPath, operation.content, { encoding: "utf8", flag: "wx" });
+                    } else {
+                        if (!current?.isFile()) throw new Error(`File changed after approval; refusing to replace: ${operation.targetPath}`);
+                        await fs.writeFile(operation.targetPath, operation.content, { encoding: "utf8" });
+                    }
+
+                    completed.push(`${operation.mode === "replace" ? "Updated" : "Created"} file: ${operation.targetPath}`);
+                    continue;
+                }
+
+                await fs.mkdir(operation.destinationDirectory, { recursive: true });
+                const sourceNow = await fs.lstat(operation.sourcePath);
+                assertNotSymlink(sourceNow, operation.sourcePath);
+                if (!sourceNow.isFile()) throw new Error(`Move source changed after approval: ${operation.sourcePath}`);
+                if (await lstatIfPresent(operation.destinationPath)) {
+                    throw new Error(`Destination appeared after approval; refusing to overwrite: ${operation.destinationPath}`);
+                }
+
+                // Exclusive copy prevents replacement, including across drives; remove source only after copy succeeds.
+                await fs.copyFile(operation.sourcePath, operation.destinationPath, fsConstants.COPYFILE_EXCL);
+                await fs.unlink(operation.sourcePath);
+                completed.push(`Moved file: ${operation.sourcePath} -> ${operation.destinationPath}`);
+            } catch (error) {
+                const done = completed.length
+                    ? `Completed before the error:\n${completed.map((item) => `- ${item}`).join("\n")}`
+                    : "No operations completed.";
+                return `Batch stopped after an error: ${error.message}\n${done}\nThe remaining operations were not attempted. Verify the listed paths before retrying.`;
+            }
+        }
+
+        return `Approved batch completed (${completed.length}/${changes.length} operations):\n${completed.map((item) => `- ${item}`).join("\n")}`;
     },
     {
-        name: "upsertFiles",
-        description: "Create/Update multiple files at once (create one if not existed)",
+        name: "applyFileOperations",
+        description: "Apply a complete batch of file changes with one permission prompt. Include every requested create, explicit replace, directory-create, and move operation in one call. The full plan is shown before anything changes. Never split one requested batch across multiple calls.",
         schema: z.object({
-            files: z.array(z.object({
-                path: z.string().describe("File path inside the active workspace; relative paths are recommended"),
-                content: z.string().describe("content of the file to be created/update")
-            }))
-        })
+            operations: z.array(fileOperationSchema).min(1).max(25).describe("All file mutations for this user request, in execution order"),
+        }),
     }
-)
+);
 
 /**
  * List all files and folders inside a specified directory.
@@ -131,102 +312,6 @@ export const listDirectoryTool = tool(
         }),
     }
 );
-
-/**
- * create directorytool has been removed because it was not used in the graph and was causing confusion. If you need to create a directory, you can use the upsertFilesTool to create a file in that directory, which will automatically create the directory if it does not exist.
- */
-
-export const createDirectoryTool = tool(
-    async ({ directory }) => {
-        const safeDirectory = await resolveWorkspacePath(directory, { allowMissing: true });
-        await fs.mkdir(safeDirectory, { recursive: true });
-
-        return `Directory created: ${safeDirectory}`;
-    },
-    {
-        name: "createDirectory",
-        description:
-            "Create a new directory or nested directories.",
-        schema: z.object({
-            directory: z.string().describe("Directory path inside the active workspace; relative paths are recommended"),
-        }),
-    }
-);
-/**
- * moveFileTool has been removed because it was not used in the graph and was causing confusion. If you need to move a file, you can use the upsertFilesTool to create a new file at the destination path and then delete the original file using fs.unlink. This will effectively move the file to the new location.
- */
-
-
-export const moveFileTool = tool(
-    async ({ source, destination }) => {
-        const safeSource = await resolveWorkspacePath(source);
-        const safeDestination = await resolveWorkspacePath(destination, { allowMissing: true });
-
-        // 1. Check source file
-        const sourceStats = await fs.stat(safeSource);
-
-        if (!sourceStats.isFile()) {
-            return "Error: Source must be a file.";
-        }
-
-        // 2. Get original filename
-        const fileName = path.basename(source);
-
-        if (/^\.[^.]+$/.test(fileName)) {
-            return `Refusing to move extension-only hidden file: ${source}`;
-        }
-
-        // 3. Build destination path
-        const destinationPath = await resolveWorkspacePath(path.join(
-            safeDestination,
-            fileName
-        ), { allowMissing: true });
-
-        // 4. Prevent moving a file to itself
-        if (path.resolve(safeSource) === path.resolve(destinationPath)) {
-            return "Error: Source and destination are the same.";
-        }
-
-        // 5. Prevent overwriting
-        try {
-            await fs.access(destinationPath);
-
-            return `Error: File already exists at ${destinationPath}`;
-        } catch (error) {
-            if (error.code !== "ENOENT") throw error;
-        }
-
-        // 6. Ask user permission
-        const approved = await askPermission(
-            "Move File",
-            `${safeSource}\n\nTO\n\n${destinationPath}`
-        );
-
-        if (!approved) {
-            return "Operation cancelled by user. No changes were made. Do not retry unless the user asks.";
-        }
-
-        // 7. Create destination folder if needed
-        await fs.mkdir(safeDestination, {
-            recursive: true
-        });
-
-        // 8. Move file
-        await fs.rename(safeSource, destinationPath);
-
-        return `Successfully moved file:\n${safeSource}\nTO:\n${destinationPath}`;
-    },
-    {
-        name: "moveFile",
-        description:
-            "Move an existing file from its source path into a destination folder. Preserve the original filename. Ask user permission before moving. Never overwrite existing files.",
-        schema: z.object({
-            source: z.string().describe("Existing file path inside the active workspace; relative paths are recommended"),
-            destination: z.string().describe("Destination folder inside the active workspace; relative paths are recommended")
-        })
-    }
-);
-
 
 /**
  * sacndirectoryTool has been removed because it was not used in the graph and was causing confusion. If you need to scan a directory, you can use the listDirectoryTool to list all files and folders inside a specified directory. This will give you the information you need about the contents of the directory.
@@ -297,4 +382,3 @@ export const scanDirectoryTool = tool(
         }),
     }
 );
-
