@@ -1,7 +1,8 @@
 import { tool } from "langchain";
 import * as z from "zod"
 import fs from "fs/promises"
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import path from "path"
 import { askPermission } from "../../security/permission.prompt.js";
 
@@ -73,6 +74,115 @@ export async function resolveWorkspacePath(inputPath, { allowMissing = false } =
         }
     }
 }
+
+const MAX_READ_LINES = 400;
+const MAX_READ_BYTES = 48 * 1024;
+const MAX_LINE_SCAN = 20_000;
+
+function isSensitiveFile(filePath) {
+    const segments = filePath.split(path.sep).map((part) => part.toLowerCase());
+    const name = path.basename(filePath).toLowerCase();
+    const sensitiveDirectories = new Set([".ssh", ".aws", ".azure", ".gnupg"]);
+
+    return segments.some((part) => sensitiveDirectories.has(part)) ||
+        /^\.env(?:\..*)?$/.test(name) ||
+        [".npmrc", ".pypirc"].includes(name) ||
+        /^(?:credentials?|secrets?)(?:[._-].*)?$/.test(name) ||
+        /^id_(?:rsa|ed25519)(?:[._-].*)?$/.test(name) ||
+        /\.(?:pem|key|p12|pfx|keystore)$/.test(name);
+}
+
+/** Read a small, numbered text range from inside the active workspace. */
+export const readFileTool = tool(
+    async ({ path: inputPath, startLine = 1, endLine }) => {
+        if (endLine !== undefined && endLine < startLine) {
+            throw new Error("endLine must be greater than or equal to startLine.");
+        }
+        if (startLine > MAX_LINE_SCAN) {
+            throw new Error(`startLine exceeds the scan limit (${MAX_LINE_SCAN}). Request a lower line range.`);
+        }
+        if (endLine !== undefined && endLine - startLine + 1 > MAX_READ_LINES) {
+            throw new Error(`A read request can return at most ${MAX_READ_LINES} lines. Narrow the requested range.`);
+        }
+
+        const safePath = await resolveWorkspacePath(inputPath);
+        if (isSensitiveFile(safePath)) {
+            throw new Error("Reading this credential or secret file is blocked by default.");
+        }
+
+        const stats = await fs.lstat(safePath);
+        if (stats.isSymbolicLink()) {
+            throw new Error("Reading symbolic links is not allowed.");
+        }
+        if (!stats.isFile()) {
+            throw new Error("readFile only supports regular files.");
+        }
+
+        const input = createReadStream(safePath, { encoding: "utf8" });
+        const lines = createInterface({ input, crlfDelay: Infinity });
+        const selected = [];
+        let currentLine = 0;
+        let outputBytes = 0;
+        let truncated = false;
+        let lastSelectedLine = startLine - 1;
+
+        try {
+            for await (const line of lines) {
+                currentLine += 1;
+
+                if (currentLine > MAX_LINE_SCAN) {
+                    truncated = true;
+                    break;
+                }
+                if (currentLine < startLine) continue;
+                if (endLine !== undefined && currentLine > endLine) break;
+                if (line.includes("\0")) {
+                    throw new Error("Binary files are not supported by readFile.");
+                }
+
+                const numberedLine = `${currentLine}: ${line}`;
+                const lineBytes = Buffer.byteLength(numberedLine, "utf8") + 1;
+                if (selected.length >= MAX_READ_LINES || outputBytes + lineBytes > MAX_READ_BYTES) {
+                    truncated = true;
+                    break;
+                }
+
+                selected.push(numberedLine);
+                outputBytes += lineBytes;
+                lastSelectedLine = currentLine;
+
+                if (selected.length === MAX_READ_LINES) {
+                    truncated = endLine === undefined || currentLine < endLine;
+                    break;
+                }
+            }
+        } finally {
+            lines.close();
+            input.destroy();
+        }
+
+        if (selected.length === 0) {
+            return truncated
+                ? `No lines were returned before the read limit. Request a smaller range from ${safePath}.`
+                : `No content found in lines ${startLine}${endLine === undefined ? " onward" : `-${endLine}`} of ${safePath}.`;
+        }
+
+        const header = `File: ${safePath}\nLines: ${startLine}-${lastSelectedLine}\n`;
+        const footer = truncated
+            ? `\n[Output truncated at ${MAX_READ_LINES} lines, ${MAX_READ_BYTES} bytes, or ${MAX_LINE_SCAN} scanned lines. Request a narrower range.]`
+            : "";
+        return `${header}\n${selected.join("\n")}${footer}`;
+    },
+    {
+        name: "readFile",
+        description: `Read a text file or a specific numbered line range inside the active workspace. Use before proposing code edits. Credential files such as .env, .npmrc, private keys, and files in .ssh/.aws/.azure are blocked. Output is capped at ${MAX_READ_LINES} lines and ${MAX_READ_BYTES} bytes.`,
+        schema: z.object({
+            path: z.string().min(1).describe("File path inside the active workspace; relative paths are recommended"),
+            startLine: z.number().int().min(1).optional().describe("First line to return; defaults to 1"),
+            endLine: z.number().int().min(1).optional().describe(`Last line to return; must be within ${MAX_READ_LINES} lines of startLine`),
+        }),
+    }
+);
 
 const fileOperationSchema = z.discriminatedUnion("type", [
     z.object({

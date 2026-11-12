@@ -27,7 +27,7 @@ outputs/                   Generated user-facing deliverables
 2. `src/app/main.js` handles startup and API-key setup.
 3. `src/agent/agent.graph.js` owns the LangGraph graph, terminal loop, and command routing.
 4. `src/agent/model.node.js` initializes the model and binds agent tools.
-5. `src/tools/files/file.tools.js` implements filesystem operations and workspace path validation.
+5. `readFileTool` reads numbered line ranges inside the active workspace, blocks common credential files and symlinks, and caps output.
 6. Mutations go through `applyFileOperationsTool`: it validates the whole batch, shows one plan, asks once, then executes sequentially. Individual write, create-directory, and move tools are not exposed to the model.
 7. `src/security/permission.prompt.js` handles approval prompts using the shared readline instance in `src/ui/readline.js`.
 8. `src/ui/` contains terminal-only presentation helpers. Formatting should not change the message history or tool results.

@@ -5,7 +5,7 @@ import { ensureApiKey } from "../config/settings.store.js";
 function printBanner() {
     console.clear();
     console.log("\n╔════════════════════════════════════════════════════════════╗");
-    console.log("║                 Puls AI CLI - Local Coding Agent         ║");
+    console.log("║                 Puls AI CLI - Local Coding Agent           ║");
     console.log("╚════════════════════════════════════════════════════════════╝\n");
     console.log("Type /help to see available commands, or /bye to exit.\n");
 }

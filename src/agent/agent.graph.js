@@ -2,7 +2,7 @@ import { MessagesAnnotation, StateGraph, START } from "@langchain/langgraph";
 import { ToolNode, toolsCondition } from "@langchain/langgraph/prebuilt";
 import { HumanMessage, SystemMessage } from "langchain";
 import { LLMNode } from "./model.node.js";
-import { applyFileOperationsTool, listDirectoryTool, scanDirectoryTool } from "../tools/files/file.tools.js";
+import { applyFileOperationsTool, listDirectoryTool, readFileTool, scanDirectoryTool } from "../tools/files/file.tools.js";
 import rl from "../ui/readline.js";
 import { startSpinner, stopSpinner, failSpinner } from "../ui/spinner.js";
 import { formatAssistantResponse } from "../ui/markdown.js";
@@ -19,7 +19,7 @@ Puls AI Commands:
 
 const graph = new StateGraph(MessagesAnnotation)
     .addNode("LLMNode", LLMNode)
-    .addNode("tools", new ToolNode([applyFileOperationsTool, listDirectoryTool, scanDirectoryTool]))
+    .addNode("tools", new ToolNode([applyFileOperationsTool, listDirectoryTool, readFileTool, scanDirectoryTool]))
     .addEdge(START, "LLMNode")
     .addConditionalEdges("LLMNode", toolsCondition)
     .addEdge("tools", "LLMNode")
@@ -30,6 +30,8 @@ export default async function initializeGraph() {
         new SystemMessage(`
             - You are a helpful assistant that can perform file operations and answer questions.
             - You can use these tools to assist the user with their requests.
+            - Use readFile to inspect relevant workspace code before suggesting or applying code changes; it is read-only and does not need approval.
+            - Never use readFile to access credential files; the tool blocks common credential paths.
             - For any request that changes files, put every requested create, replace, directory-create, and move operation into one applyFileOperations call.
             - Never split one user-requested batch across multiple applyFileOperations calls.
             - If the user denies the batch, do not retry unless the user makes a new explicit request.
