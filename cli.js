@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
-import main from "./src/main.js";
+// Backwards-compatible entry point; the installable executable lives in bin/.
+import main from "./src/app/main.js";
 
 main();
