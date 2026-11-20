@@ -15,6 +15,12 @@ await fs.writeFile(
     Array.from({ length: 405 }, (_, index) => `line-${index + 1}`).join("\n"),
     "utf8"
 );
+await fs.writeFile(path.join(workspace, "huge-line.txt"), "x".repeat(1024 * 1024), "utf8");
+await fs.writeFile(
+    path.join(workspace, "large-file.txt"),
+    Array.from({ length: 8000 }, (_, index) => `line-${index + 1}-${"x".repeat(64)}`).join("\n"),
+    "utf8"
+);
 
 const { readFileTool } = await import("../../src/tools/files/file.tools.js");
 const rl = (await import("../../src/ui/readline.js")).default;
@@ -69,4 +75,42 @@ test("caps default output at the configured line limit", async () => {
     assert.match(result, /400: line-400/);
     assert.doesNotMatch(result, /401: line-401/);
     assert.match(result, /Output truncated/i);
+});
+
+test("bounds memory and output for a huge single-line file", async () => {
+    const result = await readFileTool.invoke({ path: "huge-line.txt" });
+
+    assert.match(result, /No lines were returned before the read limits/i);
+    assert.ok(Buffer.byteLength(result, "utf8") < 1024);
+});
+
+test("does not label a completed early range as truncated just because the file is large", async () => {
+    const result = await readFileTool.invoke({
+        path: "large-file.txt",
+        startLine: 1,
+        endLine: 2,
+    });
+
+    assert.match(result, /1: line-1/);
+    assert.match(result, /2: line-2/);
+    assert.doesNotMatch(result, /Output truncated/i);
+});
+
+test('blocks Puls settings and additional credential stores inside a home workspace', async () => {
+    for (const file of ['.puls-ai/settings.json', '.kube/config', '.git-credentials', '.netrc']) {
+        const destination = path.join(workspace, file);
+        await fs.mkdir(path.dirname(destination), { recursive: true });
+        await fs.writeFile(destination, 'arbitrary-private-value', 'utf8');
+        await assert.rejects(readFileTool.invoke({ path: file }), /credential or secret file is blocked/i);
+    }
+});
+
+test('read cancellation rejects without leaving an open file handle', async () => {
+    const controller = new AbortController();
+    const result = readFileTool.invoke({ path: 'large-file.txt', startLine: 7000 }, { signal: controller.signal });
+    setImmediate(() => controller.abort());
+    await assert.rejects(result, { name: 'AbortError' });
+    // Windows refuses operations on certain open handles; a fresh ordinary read
+    // also verifies cancellation did not corrupt the tool's shared state.
+    assert.match(await readFileTool.invoke({ path: 'sample.txt' }), /1: alpha/);
 });

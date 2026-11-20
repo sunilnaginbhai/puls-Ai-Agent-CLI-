@@ -1,57 +1,42 @@
+import rl from '../ui/readline.js';
+import { pauseSpinner, resumeSpinner } from '../ui/spinner.js';
+import { sanitizeOutput } from '../ui/terminal.js';
 
-import rl from "../ui/readline.js";
-import chalk from "chalk";
-import { pauseSpinner, resumeSpinner } from "../ui/spinner.js";
-
-let permissionQueue = Promise.resolve();
-
-export function askPermission(action, details) {
-    const request = permissionQueue.then(() => requestPermission(action, details));
-    permissionQueue = request.then(() => undefined, () => undefined);
-    return request;
-}
-
-async function requestPermission(action, details) {
-    const resumeThinking = pauseSpinner();
-
-    try {
-        console.log("\n");
-        console.log(chalk.yellow.bold("  ⚠ PERMISSION REQUIRED"));
-        console.log(chalk.gray("  ─────────────────────────────────"));
-
-        console.log(
-            chalk.cyan("  Action: ") + chalk.white(action)
-        );
-
-        console.log(
-            chalk.cyan("  Details: ") + chalk.white(details)
-        );
-
-        console.log(chalk.gray("  ─────────────────────────────────"));
-
-        while (true) {
-            const answer = await rl.question(
-                chalk.yellow.bold("\n  Allow this operation? ") +
-                chalk.green("[Y] Yes ") +
-                chalk.red("[N] No ") +
-                chalk.gray(": ")
-            );
-
-            const choice = answer.trim().toLowerCase();
-
-            if (choice === "y" || choice === "yes") {
-                console.log(chalk.green("Operation approved."));
-                return true;
-            }
-
-            if (choice === "n" || choice === "no") {
-                console.log(chalk.red.bold("\n  ✖ Operation cancelled by user.\n"));
+/** Serial prompts, explicit consent, and a safe denial for pipes/CI. */
+export function createPermissionPrompt({ input = rl, output = process.stdout } = {}) {
+    let queue = Promise.resolve();
+    return function ask(action, details, { signal } = {}) {
+        const request = queue.then(async () => {
+            signal?.throwIfAborted();
+            if (!input.isInteractive) {
+                output.write('Approval required: file changes were declined because input is non-interactive. Run Puls AI in a terminal to review the plan.\n');
                 return false;
             }
-
-            console.log(chalk.red("  Invalid input. Enter y or n."));
-        }
-    } finally {
-        if (resumeThinking) resumeSpinner();
-    }
+            const resume = pauseSpinner();
+            try {
+                output.write(`\nApproval required · ${sanitizeOutput(action)}\n${sanitizeOutput(details)}\n\n`);
+                while (true) {
+                    const answer = await input.question('Apply these changes? [y/N] ', { signal });
+                    if (/^(y|yes)$/i.test(answer.trim())) {
+                        output.write('Approved.\n');
+                        return true;
+                    }
+                    if (!answer.trim() || /^(n|no)$/i.test(answer.trim())) {
+                        output.write('Declined. No planned changes applied.\n');
+                        return false;
+                    }
+                    output.write('Enter y to approve or n to decline.\n');
+                }
+            } catch (error) {
+                if (['INPUT_CANCELLED', 'ERR_INPUT_NOT_OPEN', 'ERR_USE_AFTER_CLOSE'].includes(error?.code)) return false;
+                throw error;
+            } finally {
+                if (resume && !signal?.aborted) resumeSpinner();
+            }
+        });
+        queue = request.catch(() => undefined);
+        return request;
+    };
 }
+
+export const askPermission = createPermissionPrompt();

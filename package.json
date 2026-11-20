@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node cli.js",
     "dev": "node --watch cli.js",
-    "test": "node --test"
+    "test": "node --import ./scripts/test-environment.js --test",
+    "check": "node scripts/check.js"
   },
   "bin": {
     "puls-ai": "./bin/puls-ai.js"
@@ -17,19 +18,15 @@
   "type": "module",
   "dependencies": {
     "@langchain/core": "^1.3.5",
-    "@langchain/google": "^0.2.12",
     "@langchain/google-genai": "^2.3.4",
     "@langchain/groq": "^1.3.1",
     "@langchain/langgraph": "^1.6.0",
     "@langchain/openai": "^1.8.0",
     "axios": "^1.21.0",
     "chalk": "^6.0.1",
-    "dotenv": "^18.0.9",
-    "langchain": "^1.6.1",
     "marked": "^18.2.0",
-    "marked-terminal": "^8.0.0",
+    "marked-terminal": "^7.3.1",
     "ora": "^10.0.0",
-    "readline": "^1.3.0",
     "zod": "^4.6.7"
   },
   "engines": {

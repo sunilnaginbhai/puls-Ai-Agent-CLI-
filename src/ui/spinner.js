@@ -1,25 +1,34 @@
 import ora from "ora";
+import { sanitizeOutput } from "./sanitize.js";
+import { supportsColor } from "./terminal.js";
 
 let spinner;
 let spinnerMessage = "Thinking...";
+let requested = false;
 
 export function startSpinner(message = "Thinking...") {
-    if (spinner?.isSpinning) {
-        spinner.stop();
-    }
+    spinner?.stop();
 
-    spinnerMessage = message;
+    spinnerMessage = sanitizeOutput(message).replace(/\n/g, " ");
+    requested = true;
+    // Piped transcripts should contain meaningful events, never animation.
+    if (!process.stdin.isTTY || !process.stdout.isTTY || !process.stderr.isTTY || process.env.TERM === "dumb") return;
     spinner = ora({
-        text: message,
-        spinner: "dots",
-        color: "cyan",
+        text: spinnerMessage,
+        spinner: process.platform === "win32" ? "line" : "dots",
+        color: supportsColor(process.stderr) ? "cyan" : false,
+        isEnabled: true,
+        isSilent: false,
+        discardStdin: false,
+        hideCursor: false,
     }).start();
 }
 
 export function pauseSpinner() {
-    const wasSpinning = Boolean(spinner?.isSpinning);
-    if (wasSpinning) spinner.stop();
-    return wasSpinning;
+    const wasRequested = requested;
+    spinner?.stop();
+    requested = false;
+    return wasRequested;
 }
 
 export function resumeSpinner() {
@@ -29,19 +38,26 @@ export function resumeSpinner() {
 }
 
 export function updateSpinner(message) {
+    spinnerMessage = sanitizeOutput(message).replace(/\n/g, " ");
     if (spinner?.isSpinning) {
-        spinner.text = message;
+        spinner.text = spinnerMessage;
     }
 }
 
 export function stopSpinner(message) {
+    requested = false;
     if (spinner?.isSpinning) {
-        spinner.succeed(message);
+        if (message) spinner.succeed(sanitizeOutput(message));
+        else spinner.stop();
     }
+    spinner = undefined;
 }
 
 export function failSpinner(message) {
+    requested = false;
     if (spinner?.isSpinning) {
-        spinner.fail(message);
+        if (message) spinner.fail(sanitizeOutput(message));
+        else spinner.stop();
     }
+    spinner = undefined;
 }
