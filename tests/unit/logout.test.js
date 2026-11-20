@@ -42,7 +42,7 @@ test('Ctrl+C cancels logout without deleting data', async () => {
 test('logout waits for pending history writes and reports deletion failures', async () => {
     const order = [];
     const input = { isInteractive: true, question: async () => 'yes', historyWrite: Promise.resolve().then(() => order.push('history')) };
-    await assert.rejects(confirmLogout({ input, output: { write() {} }, clearData: async () => { order.push('delete'); throw new Error('locked profile'); }, clearCredentials: () => order.push('credentials') }), /locked profile/);
+    await assert.rejects(confirmLogout({ input, output: { write() { } }, clearData: async () => { order.push('delete'); throw new Error('locked profile'); }, clearCredentials: () => order.push('credentials') }), /locked profile/);
     assert.deepEqual(order, ['history', 'delete']);
 });
 
@@ -51,7 +51,7 @@ test('confirmed logout removes all local profile data, preserves workspace, and 
     try {
         await fs.mkdir(path.join(home, '.puls-ai', 'nested'), { recursive: true });
         await fs.writeFile(path.join(home, '.puls-ai', 'history.json'), '["/logout"]');
-        await fs.writeFile(path.join(home, '.puls-ai', 'nested', 'local.txt'), 'local data');
+        await fs.writeFile(path.join(home, '.puls-ai', 'nested', 'local.txt'), 'local data')
         await fs.writeFile(path.join(home, 'project.txt'), 'preserve workspace');
         const script = `
             import {saveApiKey,getApiKey} from './src/config/settings.store.js';
@@ -67,15 +67,15 @@ test('confirmed logout removes all local profile data, preserves workspace, and 
             console.log(JSON.stringify({ok,forgot:!!cached.error,providerForgot}));
         `;
         const env = { ...process.env, PULS_HOME: home };
-        for (const key of ['PULS_API_KEY','OPENAI_API_KEY','GROQ_API_KEY','GOOGLE_API_KEY','OPENROUTER_API_KEY','FREELLMAPI_API_KEY']) delete env[key];
+        for (const key of ['PULS_API_KEY', 'OPENAI_API_KEY', 'GROQ_API_KEY', 'GOOGLE_API_KEY', 'OPENROUTER_API_KEY', 'FREELLMAPI_API_KEY']) delete env[key];
         const child = spawnSync(process.execPath, ['--input-type=module', '--eval', script], { env, encoding: 'utf8', timeout: 30000 });
         assert.equal(child.status, 0, 'Logout subprocess must succeed');
         assert.deepEqual(JSON.parse(child.stdout), { ok: true, forgot: true, providerForgot: true });
         // Key lookup may recreate an empty settings file, but never credentials/history.
-        const settings = JSON.parse(await fs.readFile(path.join(home,'.puls-ai','settings.json'),'utf8'));
+        const settings = JSON.parse(await fs.readFile(path.join(home, '.puls-ai', 'settings.json'), 'utf8'));
         assert.deepEqual(settings, {});
-        await assert.rejects(fs.access(path.join(home,'.puls-ai','history.json')));
-        await assert.rejects(fs.access(path.join(home,'.puls-ai','nested')));
-        assert.equal(await fs.readFile(path.join(home,'project.txt'),'utf8'), 'preserve workspace');
-    } finally { await fs.rm(home,{recursive:true,force:true}); }
+        await assert.rejects(fs.access(path.join(home, '.puls-ai', 'history.json')));
+        await assert.rejects(fs.access(path.join(home, '.puls-ai', 'nested')));
+        assert.equal(await fs.readFile(path.join(home, 'project.txt'), 'utf8'), 'preserve workspace');
+    } finally { await fs.rm(home, { recursive: true, force: true }); }
 });
