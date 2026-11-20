@@ -7,13 +7,16 @@ export async function createModel({ config = getProviderConfig(), apiKey, maxTok
         apiKey,
         maxRetries: 1,
         timeout: config.timeoutMs,
+        ...(config.baseURL ? { configuration: { baseURL: config.baseURL } } : {}),
     };
     switch (config.provider) {
         case "groq": {
             const { ChatGroq } = await import("@langchain/groq");
             return new ChatGroq({ ...options, maxTokens });
         }
-        case "openai": {
+        case "openai":
+        case "openrouter":
+        case "freellmapi": {
             const { ChatOpenAI } = await import("@langchain/openai");
             return new ChatOpenAI({ ...options, maxTokens });
         }

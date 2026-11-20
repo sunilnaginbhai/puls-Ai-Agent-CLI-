@@ -3,11 +3,13 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { CONFIG_DIR } from '../config/paths.js';
+import { COMMAND_NAMES, matchCommands } from './commands.js';
+import { CommandMenu } from './command-menu.js';
+import { sanitizeOutput } from './sanitize.js';
 
-export const COMMANDS = ['/help', '/status', '/clear', '/bye'];
+export const COMMANDS = COMMAND_NAMES;
 export function completeCommand(line) {
-    const matches = COMMANDS.filter((command) => command.startsWith(line.toLowerCase()));
-    return [line.startsWith('/') ? matches : [], line];
+    return [/^\/[\w-]*$/.test(line) ? matchCommands(line).map((command) => command.name) : [], line];
 }
 
 export function inputError(code = 'ERR_INPUT_NOT_OPEN') {
@@ -72,30 +74,49 @@ export class TerminalInput extends EventEmitter {
             removeHistoryDuplicates: true, crlfDelay: Infinity,
         });
         if (this.isInteractive) {
+            this.menu = new CommandMenu({ output: this.output, readline: this.interface });
             // Readline has no public key filter; keep background typing from
             // repainting the prompt over a running response. Prompts still work.
             const ttyWrite = this.interface._ttyWrite;
+            this.ttyWrite = ttyWrite;
             this.interface._ttyWrite = (data, key) => {
+                this.menu.hide();
                 if (this.busy && !this.pending) {
                     if (key?.ctrl && key.name === 'c') this.emit('cancel');
                     if (key?.ctrl && key.name === 'd') { this.emit('cancel'); void this.close(); }
                     return;
                 }
-                if (this.richInput && !this.secret && ['up', 'down'].includes(key?.name) && this.interface.line.startsWith('/')) {
-                    const prefix = this.selection?.prefix ?? this.interface.line.toLowerCase();
-                    const matches = COMMANDS.filter((command) => command.startsWith(prefix));
+                const showing = this.canShowMenu() && !this.menuDismissed;
+                if (showing && ['up', 'down'].includes(key?.name)) {
+                    const matches = this.commandMatches();
                     if (matches.length) {
-                        const index = ((this.selection?.index ?? (key.name === 'down' ? -1 : 0)) + (key.name === 'down' ? 1 : -1) + matches.length) % matches.length;
-                        this.selection = { prefix, index };
-                        ttyWrite.call(this.interface, null, { ctrl: true, name: 'u' });
-                        ttyWrite.call(this.interface, null, { ctrl: true, name: 'k' });
-                        ttyWrite.call(this.interface, matches[index], {});
+                        this.menuIndex = ((this.menuIndex ?? 0) + (key.name === 'down' ? 1 : -1) + matches.length) % matches.length;
+                        this.refreshMenu();
                         return;
                     }
                 }
-                this.selection = undefined;
+                if (showing && key?.name === 'escape') {
+                    this.menuDismissed = true;
+                    return;
+                }
+                if (showing && ['return', 'enter', 'tab'].includes(key?.name)) {
+                    const command = this.commandMatches()[this.menuIndex ?? 0];
+                    if (command) {
+                        this.replaceLine(`${command.name}${command.acceptsArgs ? ' ' : ''}`);
+                        this.menuDismissed = true;
+                        if (key.name === 'tab' || (command.acceptsArgs && !command.optionalArgs)) return;
+                    }
+                }
+                const before = this.interface.line;
                 ttyWrite.call(this.interface, data, key);
+                if (this.interface.line !== before) {
+                    this.menuDismissed = false;
+                    this.menuIndex = 0;
+                }
+                this.refreshMenu();
             };
+            this.resizeHandler = () => this.refreshMenu();
+            this.output.on?.('resize', this.resizeHandler);
         }
         this.interface.on('line', (line) => {
             if (this.pending) this.settle(null, line);
@@ -110,8 +131,10 @@ export class TerminalInput extends EventEmitter {
             if (this.pending) this.settle(inputError('INPUT_CANCELLED'));
         });
         this.interface.on('close', () => {
+            this.menu?.hide();
             this.closed = true;
             if (this.guardInput) this.input.off('data', this.guardInput);
+            if (this.resizeHandler) this.output.off?.('resize', this.resizeHandler);
             if (this.pending) this.settle(inputError());
             this.emit('close');
         });
@@ -138,16 +161,61 @@ export class TerminalInput extends EventEmitter {
     }
 
     clearLine() {
+        this.menu?.hide();
         if (!this.interface) return;
         this.interface.line = '';
         this.interface.cursor = 0;
         this.selection = undefined;
+        this.menuIndex = 0;
+        this.menuDismissed = false;
+    }
+
+    canShowMenu() {
+        return this.isInteractive && this.richInput && !this.secret && this.pending?.buffered
+            && /^\/[\w-]*$/.test(this.interface.line);
+    }
+
+    commandMatches() {
+        const line = this.interface.line.toLowerCase();
+        const followups = (this.followups ?? []).map((item, index) => ({
+            name: `/${index + 1}`, description: item.label, kind: 'prompt', acceptsArgs: false,
+        })).filter((command) => command.name.startsWith(line));
+        return [...matchCommands(line), ...followups];
+    }
+
+    refreshMenu() {
+        this.menu?.hide();
+        if (!this.canShowMenu() || this.menuDismissed) return;
+        const matches = this.commandMatches();
+        this.menuIndex = Math.min(this.menuIndex ?? 0, Math.max(0, matches.length - 1));
+        this.menu.render(matches, this.menuIndex);
+    }
+
+    replaceLine(text) {
+        this.menu?.hide();
+        this.ttyWrite.call(this.interface, null, { ctrl: true, name: 'u' });
+        this.ttyWrite.call(this.interface, null, { ctrl: true, name: 'k' });
+        this.ttyWrite.call(this.interface, text, {});
+    }
+
+    setDraft(text) {
+        if (!this.isInteractive) return false;
+        const draft = sanitizeOutput(text).replace(/\n/g, ' ');
+        if (Buffer.byteLength(draft, 'utf8') > this.maxLineBytes) return false;
+        this.draft = draft;
+        return true;
+    }
+
+    setFollowups(items = []) {
+        this.followups = items.slice(0, 3);
+        this.refreshMenu();
     }
 
     settle(error, answer) {
         const pending = this.pending;
         if (!pending) return;
         this.pending = null;
+        this.menu?.hide();
         pending.cleanup();
         if (error) pending.reject(error);
         else pending.resolve(answer);
@@ -159,16 +227,19 @@ export class TerminalInput extends EventEmitter {
         signal?.throwIfAborted();
         if (this.failure) throw this.failure;
         if (this.pending) throw new Error('Another input prompt is already active.');
-        if (this.lines.length && (!this.isInteractive || buffered)) {
+        if (this.lines.length && (!this.isInteractive || (buffered && !secret))) {
             const line = this.lines.shift();
             this.queuedBytes = Math.max(0, this.queuedBytes - Buffer.byteLength(line, 'utf8'));
+            // Fresh pasted input supersedes a suggestion selected earlier.
+            // Do not resurrect that old draft after the queued request runs.
+            if (this.isInteractive && buffered) this.draft = undefined;
             return line;
         }
         if (this.closed) throw inputError();
         if (this.isInteractive) {
             // Approval and credential prompts require fresh input. A pasted
             // command must never become an answer to a later consent prompt.
-            if (!buffered) this.clearLine();
+            if (!buffered || secret) this.clearLine();
             this.interface.setPrompt(prompt);
             this.interface.prompt();
         }
@@ -179,9 +250,22 @@ export class TerminalInput extends EventEmitter {
         try {
             return await new Promise((resolve, reject) => {
                 const abort = () => this.settle(signal.reason ?? inputError('INPUT_CANCELLED'));
-                this.pending = { resolve, reject, cleanup: () => signal?.removeEventListener('abort', abort) };
+                this.pending = { resolve, reject, buffered, cleanup: () => signal?.removeEventListener('abort', abort) };
                 signal?.addEventListener('abort', abort, { once: true });
                 if (signal?.aborted) abort();
+                if (buffered && !secret && this.draft != null && this.pending) {
+                    const draft = this.draft;
+                    this.draft = undefined;
+                    if (this.richInput) this.replaceLine(draft);
+                    else {
+                        this.interface.line = draft;
+                        this.interface.cursor = draft.length;
+                        this.interface._writeToOutput(draft);
+                    }
+                    this.menuDismissed = false;
+                    this.menuIndex = 0;
+                    this.refreshMenu();
+                }
             });
         } finally {
             this.secret = false;
@@ -223,7 +307,7 @@ export class TerminalInput extends EventEmitter {
             this.readingInput = false;
         }
         const result = parts.join('\n');
-        const command = result.trim().toLowerCase();
+        const command = result.trim().split(/\s/, 1)[0].toLowerCase();
         // Persist commands only; prompts can contain source code and credentials.
         if (this.isInteractive && this.historyFile && COMMANDS.includes(command)) {
             this.history = [command, ...this.history.filter((entry) => entry !== command)].slice(0, 100);
@@ -236,7 +320,7 @@ export class TerminalInput extends EventEmitter {
         return result;
     }
 
-    setBusy(busy) { this.busy = busy; }
+    setBusy(busy) { this.menu?.hide(); this.busy = busy; }
 
     async close() {
         this.closed = true;

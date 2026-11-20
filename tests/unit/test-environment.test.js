@@ -20,7 +20,7 @@ test('test preload isolates eager settings imports and removes inherited credent
             console.log(JSON.stringify({
                 directory: CONFIG_DIR,
                 isolated: settings.apiKey === 'disposable-test-key',
-                credentialsRemoved: !['PULS_API_KEY', 'GROQ_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'LANGSMITH_API_KEY'].some(name => process.env[name]),
+                credentialsRemoved: !['PULS_API_KEY', 'GROQ_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'OPENROUTER_API_KEY', 'FREELLMAPI_API_KEY', 'LANGSMITH_API_KEY'].some(name => process.env[name]),
                 tracingDisabled: process.env.LANGCHAIN_TRACING_V2 === 'false' && process.env.LANGSMITH_TRACING === 'false',
             }));
         `;
@@ -29,6 +29,7 @@ test('test preload isolates eager settings imports and removes inherited credent
             env: { ...process.env, PULS_HOME: fixture, PULS_AI_WORKSPACE: fixture,
                 PULS_API_KEY: 'must-not-be-inherited', GROQ_API_KEY: 'must-not-be-inherited',
                 OPENAI_API_KEY: 'must-not-be-inherited', GOOGLE_API_KEY: 'must-not-be-inherited',
+                OPENROUTER_API_KEY: 'must-not-be-inherited', FREELLMAPI_API_KEY: 'must-not-be-inherited',
                 LANGSMITH_API_KEY: 'must-not-be-inherited' },
         });
         assert.equal(child.status, 0, 'Isolated settings subprocess must exit successfully.');

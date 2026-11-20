@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 
 function run(args, input, home) {
     const env = { ...process.env, PULS_HOME: home, PULS_PROVIDER: 'openai', NO_COLOR: '1' };
-    for (const name of ['PULS_API_KEY', 'OPENAI_API_KEY', 'GROQ_API_KEY', 'GOOGLE_API_KEY', 'PULS_MODEL', 'PULS_REQUEST_TIMEOUT_MS']) delete env[name];
+    for (const name of ['PULS_API_KEY', 'OPENAI_API_KEY', 'GROQ_API_KEY', 'GOOGLE_API_KEY', 'OPENROUTER_API_KEY', 'FREELLMAPI_API_KEY', 'PULS_MODEL', 'PULS_REQUEST_TIMEOUT_MS']) delete env[name];
     return spawnSync(process.execPath, ['cli.js', ...args], { input, encoding: 'utf8', env, timeout: 30000 });
 }
 

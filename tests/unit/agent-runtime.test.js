@@ -162,3 +162,13 @@ test('interrupted mutation progress remains visible and is retained in tool hist
     assert.match(recovered.content, /first\.js/);
     assert.match(recovered.content, /remaining operations are unconfirmed/);
 });
+
+test('the tool executor blocks mutation attempts made during a read-only command', async () => {
+    let changes = 0;
+    let requests = 0;
+    const mutate = tool(async () => { changes++; return 'must not execute'; }, { name: 'applyFileOperations', schema: z.object({ path: z.string() }) });
+    const graph = createAgentGraph({ tools: [mutate], modelNode: async () => ({ messages: [++requests === 1 ? call('applyFileOperations', 'blocked-1') : new AIMessage('Analysis complete.')] }) });
+    const result = await graph.invoke({ messages: [new HumanMessage('Review file')] }, { configurable: { execution: createExecutionState(), toolPolicy: 'read-only' } });
+    assert.equal(changes, 0);
+    assert.match(result.messages.find((message) => message.tool_call_id === 'blocked-1').content, /read-only/);
+});

@@ -22,7 +22,10 @@ export function createToolExecutor(tools) {
             const key = `${call.name}:${JSON.stringify(stable(call.args))}`;
             const details = call.args?.path ?? call.args?.directory ?? (call.name === 'applyFileOperations' ? `${call.args?.operations?.length ?? 0} planned changes` : '');
             let result;
-            if (execution.cache.has(key)) {
+            if (config.configurable?.toolPolicy === 'read-only' && call.name === 'applyFileOperations') {
+                result = new ToolMessage({ content: 'This command is read-only. Report analysis or a plan; file operations were not executed.', status: 'error', name: call.name, tool_call_id: call.id });
+                emit({ name: call.name, status: 'blocked', details });
+            } else if (execution.cache.has(key)) {
                 const previous = execution.cache.get(key);
                 result = new ToolMessage({ content: previous.content, status: previous.status, name: call.name, tool_call_id: call.id });
                 emit({ name: call.name, status: 'cached', details });

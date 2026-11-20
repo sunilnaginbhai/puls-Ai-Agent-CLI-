@@ -17,7 +17,8 @@ export async function LLMNode(state, config = {}) {
         scanDirectory: scanDirectoryTool,
     }
     const latestUserMessage = getRoutingMessageText(state.messages)
-    const toolNames = selectToolsForMessage(latestUserMessage)
+    const toolNames = selectToolsForMessage(latestUserMessage).filter((name) =>
+        config.configurable?.toolPolicy !== 'read-only' || name !== 'applyFileOperations')
     const tools = toolNames.map((name) => toolCatalog[name])
     const maxTokens = toolNames.includes("applyFileOperations") ? 4096 : 1024
     const providerConfig = config.configurable?.providerConfig ?? getProviderConfig()

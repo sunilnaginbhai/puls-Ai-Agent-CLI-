@@ -157,3 +157,17 @@ test('output-limited tool responses never reach execution even when JSON is comp
         },
     }), (error) => error.code === 'MODEL_OUTPUT_TRUNCATED');
 });
+
+test('read-only commands never bind mutation tools even when the task mentions fixes', async () => {
+    let boundTools;
+    await LLMNode({ messages: [{ role: 'user', content: 'Review and fix bugs in src/main.js' }] }, {
+        configurable: {
+            apiKey: 'test-key', providerConfig, toolPolicy: 'read-only',
+            modelFactory: async () => ({ bindTools(tools) {
+                boundTools = tools.map((tool) => tool.name);
+                return { async *stream() { yield new AIMessageChunk({ content: 'Review findings.' }); } };
+            } }),
+        },
+    });
+    assert.deepEqual(boundTools, ['readFile']);
+});

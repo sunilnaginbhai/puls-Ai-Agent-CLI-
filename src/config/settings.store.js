@@ -8,6 +8,36 @@ const SETTINGS_FILE = path.join(CONFIG_DIR, 'settings.json');
 const sessionApiKeys = new Map();
 let settingsWrite = Promise.resolve();
 
+export async function updateSettings(update) {
+    const write = settingsWrite.then(async () => {
+        const settings = await getSettingsFile();
+        const updated = await update(settings);
+        const temporaryFile = `${SETTINGS_FILE}.${randomUUID()}.tmp`;
+        try {
+            await fs.writeFile(temporaryFile, JSON.stringify(updated, null, 2), { mode: 0o600, flag: 'wx' });
+            await fs.rename(temporaryFile, SETTINGS_FILE);
+        } finally { await fs.rm(temporaryFile, { force: true }); }
+        return updated;
+    });
+    settingsWrite = write.catch(() => undefined);
+    return write;
+}
+
+/** Delete only Puls's own local profile after the caller confirms logout. */
+export async function clearLocalData() {
+    const reset = settingsWrite.then(async () => {
+        const target = path.resolve(CONFIG_DIR);
+        if (path.basename(target) !== '.puls-ai' || target === path.parse(target).root) throw new Error('Invalid Puls profile path.');
+        try {
+            if ((await fs.lstat(target)).isSymbolicLink()) throw new Error('Logout cannot delete a linked Puls profile directory.');
+        } catch (error) { if (error.code !== 'ENOENT') throw error; }
+        await fs.rm(target, { recursive: true, force: true });
+        sessionApiKeys.clear();
+    });
+    settingsWrite = reset.catch(() => undefined);
+    return reset;
+}
+
 export async function getSettingsFile() {
     await fs.mkdir(CONFIG_DIR, { recursive: true, mode: 0o700 });
 
@@ -41,21 +71,9 @@ export async function saveApiKey(apiKey, { provider = 'groq' } = {}) {
         throw new Error('API key cannot be empty.');
     }
 
-    const write = settingsWrite.then(async () => {
-        const settingsContent = await getSettingsFile();
-        const updated = provider === 'groq'
-            ? { ...settingsContent, apiKey: normalizedKey }
-            : { ...settingsContent, providers: { ...settingsContent.providers, [provider]: { ...settingsContent.providers?.[provider], apiKey: normalizedKey } } };
-        const temporaryFile = `${SETTINGS_FILE}.${process.pid}.${randomUUID()}.tmp`;
-        try {
-            await fs.writeFile(temporaryFile, JSON.stringify(updated, null, 2), { mode: 0o600, flag: 'wx' });
-            await fs.rename(temporaryFile, SETTINGS_FILE);
-        } finally {
-            await fs.rm(temporaryFile, { force: true });
-        }
-    });
-    settingsWrite = write.catch(() => undefined);
-    await write;
+    await updateSettings((settingsContent) => provider === 'groq'
+        ? { ...settingsContent, activeProvider: provider, apiKey: normalizedKey }
+        : { ...settingsContent, activeProvider: provider, providers: { ...settingsContent.providers, [provider]: { ...settingsContent.providers?.[provider], apiKey: normalizedKey } } });
     sessionApiKeys.set(provider, normalizedKey);
     return normalizedKey;
 }

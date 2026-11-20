@@ -2,13 +2,8 @@ import { sanitizeOutput } from "./sanitize.js";
 export { sanitizeOutput, registerSecret } from "./sanitize.js";
 import { Chalk } from "chalk";
 import { formatError } from "./error-format.js";
-
-export const COMMANDS = Object.freeze([
-    { name: "/help", description: "Show commands and keyboard shortcuts" },
-    { name: "/status", description: "Show model, workspace, and session activity" },
-    { name: "/clear", description: "Clear the terminal" },
-    { name: "/bye", description: "Exit Puls AI" },
-]);
+import { COMMANDS, COMMAND_NAMES } from './commands.js';
+export { COMMANDS } from './commands.js';
 
 export function terminalWidth(output = process.stdout) {
     const columns = Number(output.columns);
@@ -59,22 +54,49 @@ export function createTerminal({ output = process.stdout, error = process.stderr
         },
         help() {
             emit(`\n${color.bold("Commands")}\n\n`);
-            for (const { name, description } of COMMANDS) detail(name.padEnd(9), description);
+            for (const { usage, description } of COMMANDS) detail(usage, description);
             emit(`\n${color.bold("Keyboard")}\n\n`);
-            detail("Tab", "Complete a slash command; Tab again lists matches");
-            detail("Up / Down", "Navigate history; cycle command matches after /");
+            detail("/", "Open command suggestions; keep typing to filter");
+            detail("Up / Down", "Choose a suggestion, or navigate input history");
+            detail("Enter / Tab", "Accept / complete a suggestion; Esc closes the menu");
+            detail("/1 /2 /3", "Draft a follow-up after a response; Enter sends it");
             detail("Multiline", "End a line with \\ to continue; submit a line without \\");
             detail("Ctrl+C", "Cancel a request or clear input; press again to exit");
             detail("Ctrl+D", "Exit when input is empty");
             emit("\n");
         },
-        status({ model = "Not configured", provider, workspace = process.cwd(), turns = 0, status = "Ready" } = {}) {
+        status({ model = "Not configured", provider, workspace = process.cwd(), turns = 0, status = "Ready", telegram } = {}) {
             emit(`\n${color.bold("Session status")}\n\n`);
             detail("Model", provider ? `${model} · ${provider}` : model);
             detail("Workspace", workspace);
             detail("Agent", status);
             detail("Turns", turns);
+            if (telegram) detail('Telegram', telegram);
             emit("\n");
+        },
+        model({ model, label, provider, timeoutMs } = {}) {
+            emit(`\n${color.bold('Active model')}\n\n`);
+            detail('Model', model ?? 'Not configured');
+            detail('Provider', label ?? provider ?? 'Not configured');
+            if (timeoutMs) detail('Request timeout', `${timeoutMs / 1000}s`);
+            emit('\n');
+        },
+        workspace(value) { detail('Workspace', value); },
+        history(entries = []) {
+            const commands = entries.filter((entry) => COMMAND_NAMES.includes(entry)).slice(0, 15);
+            emit(`\n${color.bold('Recent commands')}\n\n`);
+            if (commands.length) commands.forEach((entry) => detail(' ', entry));
+            else emit('No saved commands yet.\n');
+            emit('\n');
+        },
+        followups(suggestions = []) {
+            if (!suggestions.length) {
+                emit('Follow-up suggestions appear after an AI response.\n');
+                return;
+            }
+            emit(`\n${color.bold(wrap('Suggested next steps', terminalWidth(output)))}\n`);
+            suggestions.slice(0, 3).forEach((suggestion, index) => detail(`/${index + 1}`, suggestion.label));
+            emit(`${color.dim(wrap('Choose /1, /2, or /3 to draft a prompt. Review it, then press Enter.', terminalWidth(output)))}\n\n`);
         },
         user(text) {
             emit(`\n${color.bold("You")}\n${sanitizeOutput(text, { env })}\n\n`);

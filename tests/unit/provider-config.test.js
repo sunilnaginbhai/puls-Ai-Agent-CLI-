@@ -14,6 +14,22 @@ test("provider config preserves the existing default and supports explicit provi
     assert.equal(JSON.stringify(config).includes("secret"), false);
 });
 
+test("OpenRouter defaults to free-model routing and its OpenAI-compatible API endpoint", () => {
+    const config = getProviderConfig({ PULS_PROVIDER: "openrouter" });
+    assert.equal(config.provider, "openrouter");
+    assert.equal(config.model, "openrouter/free");
+    assert.equal(config.keyEnv, "OPENROUTER_API_KEY");
+    assert.equal(config.baseURL, "https://openrouter.ai/api/v1");
+});
+
+test("FreeLLMAPI uses its router model and OpenAI-compatible API endpoint", () => {
+    const config = getProviderConfig({ PULS_PROVIDER: "freellmapi" });
+    assert.equal(config.provider, "freellmapi");
+    assert.equal(config.model, "auto");
+    assert.equal(config.keyEnv, "FREELLMAPI_API_KEY");
+    assert.equal(config.baseURL, "https://api.freellmapi.com/v1");
+});
+
 test("invalid provider, timeout, and model values fail before starting a request", () => {
     assert.throws(() => getProviderConfig({ PULS_PROVIDER: "unsupported" }), /Unsupported provider/);
     for (const timeout of ["abc", "0", "10000000", "1.5"]) {
@@ -53,11 +69,14 @@ test("non-Groq credentials never contact Groq for validation", async () => {
 });
 
 test("factory creates the requested installed provider adapter without a network request", async () => {
-    for (const provider of ["groq", "openai", "google"]) {
+    for (const provider of ["groq", "openai", "google", "openrouter", "freellmapi"]) {
         const config = getProviderConfig({ PULS_PROVIDER: provider });
         const model = await createModel({ config, apiKey: "offline-test-key", maxTokens: 1024 });
         assert.equal(model.model ?? model.modelName, config.model);
         assert.equal(typeof model.stream, "function");
+        if (provider === "openrouter" || provider === "freellmapi") {
+            assert.equal(model.clientConfig.baseURL, config.baseURL);
+        }
     }
 });
 

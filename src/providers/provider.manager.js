@@ -3,6 +3,11 @@ import { getProviderConfig } from "./provider.config.js";
 
 const sessionKeys = new Map();
 
+export function clearProviderSession() {
+    sessionKeys.clear();
+    for (const name of ['PULS_API_KEY', 'GROQ_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'OPENROUTER_API_KEY', 'FREELLMAPI_API_KEY']) delete process.env[name];
+}
+
 /** Resolve provider-specific keys before the backwards-compatible Puls key. */
 export async function getProviderApiKey({
     config = getProviderConfig(), env = process.env, getKey = getApiKey,
